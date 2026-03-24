@@ -1,3 +1,7 @@
+import os
+import re
+import shutil
+import zipfile
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -270,3 +274,42 @@ def apply_openpyxl_highlighting(file_path: str, metadata: dict, start_row: int, 
         
     except Exception as e:
         print(f"Highlighting Error: {e}")
+
+def clean_excel_file(file_path: str):
+    """
+    Strips definedNames from the workbook.xml of an .xlsx file.
+    This fixes openpyxl crashes on files saved from older formats containing broken named ranges.
+    """
+    if not str(file_path).lower().endswith('.xlsx'):
+        return
+        
+    try:
+        temp_dir = str(file_path) + "_temp_unzip"
+        os.makedirs(temp_dir, exist_ok=True)
+        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+        
+        workbook_xml_path = os.path.join(temp_dir, 'xl', 'workbook.xml')
+        if os.path.exists(workbook_xml_path):
+            with open(workbook_xml_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Remove definedNames block
+            if '<definedNames>' in content:
+                cleaned_content = re.sub(r'<definedNames>.*?</definedNames>', '', content, flags=re.DOTALL)
+                
+                with open(workbook_xml_path, 'w', encoding='utf-8') as f:
+                    f.write(cleaned_content)
+                
+                # Repack only if modified
+                with zipfile.ZipFile(file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(temp_dir):
+                        for file in files:
+                            abs_path = os.path.join(root, file)
+                            rel_path = os.path.relpath(abs_path, temp_dir)
+                            zipf.write(abs_path, rel_path)
+                            
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception as e:
+        print(f"Failed to clean excel file {file_path}: {e}")
+

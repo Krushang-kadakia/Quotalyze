@@ -6,7 +6,7 @@ import os
 
 from utils import setup_tender_structure, create_session_workspace, detect_boq_index
 import shutil
-from excel_utils import apply_formatting, overlay_analysis_on_template, apply_openpyxl_highlighting
+from excel_utils import apply_formatting, overlay_analysis_on_template, apply_openpyxl_highlighting, clean_excel_file
 
 st.set_page_config(page_title="Quotalyze", layout="wide")
 
@@ -31,10 +31,11 @@ if st.session_state.get('restore_pending_name'):
 with st.expander("⚠️ Important Usage Guidelines", expanded=True):
     st.markdown("""
     **APPLICATION CONSTRAINTS:**
-    1. **No External Links**: Ensure Reference & Vendor files contain *values only*, not formulas linking to other files.
-    2. **Table Headers**: Reference file main table must have correct headers (S.No, Description, Qty, Unit).
-    3. **Vendor Naming**: Name your vendor files using the Vendor's Name (e.g., `VendorA.xlsx`), as this name will appear in reports.
-    4. **Partial Quotations**: If a Quantity is present (not null) and any vendor has not quoted for that particular item, an alert will be generated stating "All vendors have not quoted for all items".
+    1. **No Reference Links**: The reference file should have no reference cells to internal files. If there are formulas or references in vendor files for rate and amount, the application will fail. Ensure files contain *values only*.
+    2. **Table Headers**: The reference file's main table must have proper headers (e.g. S.No, Description, Qty, Unit). If there is any naming error, the application will fail.
+    3. **Vendor Naming**: The vendor files should be named using the vendor's actual name (e.g., `VendorA.xlsx`), as this name will appear in the generated reports.
+    4. **File Format**: The files MUST be in `.xlsx` format. Do not upload `.xls` files. Open any `.xls` files in Excel and save them as `.xlsx` before uploading.
+    5. **Partial Quotations**: If a Quantity is present (not null) and any vendor has not quoted for that particular item, an alert will be generated stating "All vendors have not quoted for all items".
     """)
 
 tender_name = st.text_input("Project / Tender Name", value="", key="project_name_input")
@@ -111,7 +112,7 @@ if 'ref_uploader_key_id' not in st.session_state:
     st.session_state['ref_uploader_key_id'] = 0
 
 ref_key = f"ref_uploader_{st.session_state['ref_uploader_key_id']}"
-reference_file = st.file_uploader("Upload Reference (Replaces current)", type=["xlsx", "xls"], key=ref_key)
+reference_file = st.file_uploader("Upload Reference (Replaces current)", type=["xlsx"], key=ref_key)
 
 if reference_file:
     # Delete ALL existing
@@ -124,6 +125,8 @@ if reference_file:
     save_path = os.path.join(reference_dir, reference_file.name)
     with open(save_path, "wb") as f:
         f.write(reference_file.getbuffer())
+    
+    clean_excel_file(save_path)
     
     # Reset uploader & analysis
     st.session_state['ref_uploader_key_id'] += 1
@@ -168,7 +171,7 @@ if 'uploader_key_id' not in st.session_state:
     
 uploader_key = f"vendor_uploader_{st.session_state['uploader_key_id']}"
 
-new_uploads = st.file_uploader("Upload Vendor Excels", type=["xlsx", "xls"], accept_multiple_files=True, key=uploader_key, label_visibility="collapsed")
+new_uploads = st.file_uploader("Upload Vendor Excels", type=["xlsx"], accept_multiple_files=True, key=uploader_key, label_visibility="collapsed")
 
 if new_uploads:
     # Save immediately and reset
@@ -176,6 +179,7 @@ if new_uploads:
             v_path = os.path.join(vendor_dir, vf.name)
             with open(v_path, "wb") as f:
                 f.write(vf.getbuffer())
+            clean_excel_file(v_path)
     
     # Reset uploader to clear list
     st.session_state['uploader_key_id'] += 1
@@ -271,6 +275,7 @@ if valid_ref_source and valid_vendor_sources:
                      save_path = os.path.join(reference_dir, reference_file.name)
                      with open(save_path, "wb") as f:
                         f.write(reference_file.getbuffer())
+                     clean_excel_file(save_path)
                      final_ref_path = save_path
                 else:
                      final_ref_path = selected_ref_file_path
