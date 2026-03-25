@@ -1,7 +1,7 @@
-streamlit
-pandas
-openpyxl
-python-dotenv
-xlsxwriter
-rapidfuzz
-xlrd>=2.0.1
+streamlit==1.53.1
+pandas==2.3.3
+openpyxl==3.1.5
+python-dotenv==1.2.1
+xlsxwriter==3.2.9
+rapidfuzz==3.14.3
+xlrd==2.0.2
