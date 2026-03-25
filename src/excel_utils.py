@@ -227,40 +227,36 @@ def apply_openpyxl_highlighting(file_path: str, metadata: dict, start_row: int, 
         
         green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid") # LightGreen
         red_fill = PatternFill(start_color="F08080", end_color="F08080", fill_type="solid")   # LightCoral
+        yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")   # Yellow (Closest to Est)
         
         # Header in Excel is start_row + 1. Data starts at start_row + 2
         data_start_row = start_row + 2
         
         min_max_data = metadata.get('min_max', {})
+        min_max_amounts = metadata.get('min_max_amounts', {})
+        closest_vendors = metadata.get('closest_vendors', {})
         
         # Map column names to indices for fast lookup
-        # columns is the list of df columns
-        rate_col_indices = []
+        rate_col_map = {}
+        amount_col_map = {}
         for idx, col in enumerate(columns):
-            if str(col).startswith("Rate_"):
-                # Excel index is idx + 1
-                rate_col_indices.append(idx + 1)
-                
-        if not rate_col_indices:
+            col_str = str(col)
+            if col_str.startswith("Rate_"):
+                rate_col_map[col_str.replace("Rate_", "")] = idx + 1
+            elif col_str.startswith("Amount_"):
+                amount_col_map[col_str.replace("Amount_", "")] = idx + 1
+
+        if not rate_col_map and not amount_col_map:
             return
 
-        # Iterate rows in metadata
+        # 1. Highlight Item Rates
         for row_idx, stats in min_max_data.items():
-            # final_report row_index corresponds to excel row: data_start_row + row_idx (if index is 0-based sequential)
-            # BUT 'row_idx' from metadata comes from final_report.index. 
-            # If final_report was just a copy of ref_df reset_index, it's 0, 1, 2...
-            # Yes, main.py does report_df = ref_df.copy() and no filtering that changes index numbers relative to position 
-            # (unless we filtered rows, but we didn't).
-            
             excel_r = data_start_row + row_idx
-            
             r_min = stats['min']
             r_max = stats['max']
-            
-            for c_idx in rate_col_indices:
+            for v_name, c_idx in rate_col_map.items():
                 cell = ws.cell(row=excel_r, column=c_idx)
                 val = cell.value
-                
                 try:
                     if val is not None and float(val) == r_min:
                         cell.fill = green_fill
@@ -269,6 +265,32 @@ def apply_openpyxl_highlighting(file_path: str, metadata: dict, start_row: int, 
                 except:
                     pass
                     
+        # 2. Highlight Subtotal/Total Amounts
+        for row_idx, stats in min_max_amounts.items():
+            excel_r = data_start_row + row_idx
+            r_min = stats['min']
+            r_max = stats['max']
+            for v_name, c_idx in amount_col_map.items():
+                cell = ws.cell(row=excel_r, column=c_idx)
+                val = cell.value
+                try:
+                    val = cell.value
+                    if val is not None and float(val) == r_min:
+                        cell.fill = green_fill
+                    elif val is not None and float(val) == r_max:
+                        cell.fill = red_fill
+                except:
+                    pass
+                    
+        # 3. Highlight Closest to Estimated Rates (Yellow OVERRIDES existing colors)
+        for row_idx, closest_vs in closest_vendors.items():
+            excel_r = data_start_row + row_idx
+            for v_name in closest_vs:
+                c_idx = rate_col_map.get(v_name)
+                if c_idx:
+                    cell = ws.cell(row=excel_r, column=c_idx)
+                    cell.fill = yellow_fill
+
         wb.save(file_path)
         print(f"Highlighting applied to {file_path}")
         

@@ -36,6 +36,7 @@ with st.expander("⚠️ Important Usage Guidelines", expanded=True):
     3. **Vendor Naming**: The vendor files should be named using the vendor's actual name (e.g., `VendorA.xlsx`), as this name will appear in the generated reports.
     4. **File Format**: The files MUST be in `.xlsx` format. Do not upload `.xls` files. Open any `.xls` files in Excel and save them as `.xlsx` before uploading.
     5. **Partial Quotations**: If a Quantity is present (not null) and any vendor has not quoted for that particular item, an alert will be generated stating "All vendors have not quoted for all items".
+    6. **Reference File Structure**: The reference file should not have any blank columns before the sr.no column.  
     """)
 
 tender_name = st.text_input("Project / Tender Name", value="", key="project_name_input")
@@ -130,6 +131,42 @@ if reference_file:
     
     # Reset uploader & analysis
     st.session_state['ref_uploader_key_id'] += 1
+    st.session_state['analysis_done'] = False
+    st.rerun()
+
+st.divider()
+
+# 1.5 Estimated Rate File Section
+st.subheader("Estimated Rate File (Optional)")
+estimated_dir = os.path.join(paths['base'], 'estimated')
+os.makedirs(estimated_dir, exist_ok=True)
+existing_est_files = [f for f in os.listdir(estimated_dir) if not f.startswith('.')]
+
+if existing_est_files:
+    current_est = existing_est_files[0]
+    st.success(f"📄 Using Estimate: **{current_est}**")
+    selected_est_file_path = os.path.join(estimated_dir, current_est)
+else:
+    st.info("No estimated rate file uploaded.")
+    selected_est_file_path = None
+
+if 'est_uploader_key_id' not in st.session_state:
+    st.session_state['est_uploader_key_id'] = 0
+
+est_key = f"est_uploader_{st.session_state['est_uploader_key_id']}"
+estimated_file = st.file_uploader("Upload Estimated Rate (Optional)", type=["xlsx"], key=est_key)
+
+if estimated_file:
+    for f in existing_est_files:
+        try: os.remove(os.path.join(estimated_dir, f))
+        except: pass
+    
+    save_path = os.path.join(estimated_dir, estimated_file.name)
+    with open(save_path, "wb") as f:
+        f.write(estimated_file.getbuffer())
+    
+    clean_excel_file(save_path)
+    st.session_state['est_uploader_key_id'] += 1
     st.session_state['analysis_done'] = False
     st.rerun()
 
@@ -231,6 +268,24 @@ if valid_ref_source and valid_vendor_sources:
         except Exception as e:
             st.error(f"Error reading Reference: {e}")
 
+        # 1.5 Estimated Sheet Logic
+        valid_est_source = estimated_file if estimated_file else selected_est_file_path
+        if valid_est_source:
+             try:
+                 if isinstance(valid_est_source, str):
+                     xl_est = pd.ExcelFile(valid_est_source)
+                 else:
+                     valid_est_source.seek(0)
+                     xl_est = pd.ExcelFile(valid_est_source)
+                     valid_est_source.seek(0)
+                 
+                 est_idx = detect_boq_index(xl_est.sheet_names)
+                 label_name = os.path.basename(valid_est_source) if isinstance(valid_est_source, str) else valid_est_source.name
+                 selected_est_sheet = st.selectbox(f"Estimated Rate: {label_name}", xl_est.sheet_names, index=est_idx, key="est_sheet")
+                 sheet_config['estimated_rate'] = selected_est_sheet
+             except Exception as e:
+                 st.error(f"Error reading Estimated: {e}")
+
         st.divider()
 
         # 2. Vendor Sheets
@@ -307,8 +362,8 @@ if valid_ref_source and valid_vendor_sources:
                 try:
                     # Note: process_quotations expects 'reference' key for ref file
                     # and vendor_name keys for vendors.
-                    
-                    final_report, metadata = process_quotations(final_ref_path, final_vendor_list, sheet_config=sheet_config)
+                    valid_est_source = estimated_file if estimated_file else selected_est_file_path
+                    final_report, metadata = process_quotations(final_ref_path, final_vendor_list, sheet_config=sheet_config, estimated_file=valid_est_source)
                     
                     # Store results in Session State for persistence
                     st.session_state['analysis_done'] = True
@@ -359,28 +414,43 @@ if valid_ref_source and valid_vendor_sources:
         report_filename = f"{tender_name}_report.xlsx"
         output_path = os.path.join(paths['output'], report_filename)
         
+        def highlight_min_max(df):
+            styles = pd.DataFrame('', index=df.index, columns=df.columns)
+            min_max_data = metadata.get('min_max', {})
+            min_max_amounts = metadata.get('min_max_amounts', {})
+            closest_vendors = metadata.get('closest_vendors', {})
+            
+            for row_idx, stats in min_max_data.items():
+                r_min = stats['min']
+                r_max = stats['max']
+                for col in df.columns:
+                    if str(col).startswith("Rate_"):
+                        try:
+                            val = float(df.at[row_idx, col])
+                            if abs(val - r_min) < 1e-9: styles.at[row_idx, col] = 'background-color: lightgreen; color: black;'
+                            elif abs(val - r_max) < 1e-9: styles.at[row_idx, col] = 'background-color: lightcoral; color: black;'
+                        except: pass
+                        
+            for row_idx, stats in min_max_amounts.items():
+                r_min = stats['min']
+                r_max = stats['max']
+                for col in df.columns:
+                    if str(col).startswith("Amount_"):
+                        try:
+                            val = float(df.at[row_idx, col])
+                            if abs(val - r_min) < 1e-9: styles.at[row_idx, col] = 'background-color: lightgreen; color: black;'
+                            elif abs(val - r_max) < 1e-9: styles.at[row_idx, col] = 'background-color: lightcoral; color: black;'
+                        except: pass
+                        
+            for row_idx, closest_vs in closest_vendors.items():
+                for v_name in closest_vs:
+                    col = f"Rate_{v_name}"
+                    if col in styles.columns:
+                         styles.at[row_idx, col] = 'background-color: yellow; color: black;'
+            return styles
+            
         if not st.session_state.get('output_generated'):
             # --- Advanced Styling & Save (One Time) ---
-            def highlight_min_max(df):
-                styles = pd.DataFrame('', index=df.index, columns=df.columns)
-                min_max_data = metadata.get('min_max', {})
-                for row_idx, stats in min_max_data.items():
-                    r_min = stats['min']
-                    r_max = stats['max']
-                    for col in df.columns:
-                        if col.startswith("Rate_"):
-                            val = df.at[row_idx, col]
-                            try:
-                                f_val = float(val)
-                                if f_val == r_min:
-                                    styles.at[row_idx, col] = 'background-color: lightgreen; color: black;'
-                                elif f_val == r_max:
-                                    styles.at[row_idx, col] = 'background-color: lightcoral; color: black;'
-                            except:
-                                pass
-                return styles
-
-            # Apply UI styles for preview
             styled_df = final_report.style.apply(highlight_min_max, axis=None).format(na_rep="", precision=2)
 
             # Save Styled Excel using Template Overlay
@@ -403,26 +473,6 @@ if valid_ref_source and valid_vendor_sources:
                 final_report.to_excel(output_path, index=False)
 
         else:
-             # Re-create styled df for preview if needed, or just show raw
-             # Let's recreate style for consistency
-            def highlight_min_max(df):
-                styles = pd.DataFrame('', index=df.index, columns=df.columns)
-                min_max_data = metadata.get('min_max', {})
-                for row_idx, stats in min_max_data.items():
-                    r_min = stats['min']
-                    r_max = stats['max']
-                    for col in df.columns:
-                        if col.startswith("Rate_"):
-                            val = df.at[row_idx, col]
-                            try:
-                                f_val = float(val)
-                                if f_val == r_min:
-                                    styles.at[row_idx, col] = 'background-color: lightgreen; color: black;'
-                                elif f_val == r_max:
-                                    styles.at[row_idx, col] = 'background-color: lightcoral; color: black;'
-                            except:
-                                pass
-                return styles
             styled_df = final_report.style.apply(highlight_min_max, axis=None).format(na_rep="", precision=2)
 
         

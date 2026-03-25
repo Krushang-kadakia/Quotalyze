@@ -83,7 +83,7 @@ def verify_amounts(final_report: pd.DataFrame) -> tuple[pd.DataFrame, list]:
     return final_report, verification_errors
 
 
-def process_quotations(ref_file, vendor_files, sheet_config=None) -> tuple[pd.DataFrame, dict]:
+def process_quotations(ref_file, vendor_files, sheet_config=None, estimated_file=None) -> tuple[pd.DataFrame, dict]:
     """
     Args:
         ref_file: Path (str) or file-like object for reference.
@@ -133,6 +133,18 @@ def process_quotations(ref_file, vendor_files, sheet_config=None) -> tuple[pd.Da
         except Exception as e:
             print(f" Failed: {e}")
 
+    if estimated_file:
+        print("Processing Estimated Rates...", end="")
+        try:
+            est_sheet = sheet_config.get('estimated_rate')
+            est_df = load_vendor(estimated_file, sheet_name=est_sheet)
+            aligned_est = align_vendor_to_reference(ref_df, est_df, schema)
+            final_report['Estimated_Rate'] = aligned_est['Rate']
+            print(" Done.")
+        except Exception as e:
+            print(f" Failed: {e}")
+            estimated_file = None
+
     # Backfill Total Row Logic
     # 1. Identify "Total" row (Strict check to avoid matching "Total Concrete" etc.)
     # We look for "Total", "Grand Total", "Total Amount" (case-insensitive, stripped)
@@ -166,89 +178,125 @@ def process_quotations(ref_file, vendor_files, sheet_config=None) -> tuple[pd.Da
 
     metadata = {
         'valid_rows': [],
-        'min_max': {},       # {row_idx: {'min': val, 'max': val}}
+        'min_max': {},               # {row_idx: {'min': val, 'max': val}}
+        'min_max_amounts': {},       # {row_idx: {'min': val, 'max': val}}
+        'closest_vendors': {},       # {row_idx: [list of vendor names]}
         'incomplete_vendors': [],
         'verification_errors': verification_errors,
         'header_row_index': schema.header_row_index # Propagate detect header location
     }
     
-    # 1. Identify Valid Items (Qty is numeric > 0 OR acceptable text like "L.S.")
-    # We need to operate on specific columns.
-    
+    # 1. Identify Valid Items
     qty_series = pd.to_numeric(final_report['qty'], errors='coerce')
-    
-    # Check for non-numeric non-empty strings in 'qty'
-    # Treat them as valid for analysis (we just can't verify amounts mathematically)
     raw_qty = final_report['qty'].astype(str).str.strip().str.lower()
     
-    # Valid if: Numeric > 0 OR (Not Numeric AND Not Empty/Nan)
     is_numeric_valid = (qty_series.notna()) & (qty_series > 0)
     is_text_valid = (qty_series.isna()) & (raw_qty != 'nan') & (raw_qty != '') & (raw_qty != 'none')
     
     valid_mask = is_numeric_valid | is_text_valid
-    
     metadata['valid_rows'] = final_report.index[valid_mask].tolist()
     
-    # Identify Vendor Rate Columns
+    # Identify Columns
     rate_cols = [c for c in final_report.columns if c.startswith("Rate_")]
+    amount_cols = [c for c in final_report.columns if c.startswith("Amount_")]
     vendor_names = [c.replace("Rate_", "") for c in rate_cols]
     
-    # 2. Compute Min/Max Rates per Valid Item & Identify Vendors
-    # We iterate only over valid rows to determine highlighting stats AND population of new columns
-    
-    # Initialize new columns
+    # Initialize calculated metrics
     final_report['Lowest_Vendor'] = ""
     final_report['Highest_Vendor'] = ""
+    if estimated_file:
+        final_report['Closest_to_Estimate'] = ""
 
-    for idx in metadata['valid_rows']:
-        # Extract rates for this row
-        row_rates = []     # List of values for stats
-        rate_map = []      # List of (val, vendor_name) for identification
+    # Iterate over all rows for exhaustive Min/Max and Estimated Rate analytics
+    for idx in final_report.index:
+        is_item = idx in metadata['valid_rows']
         
-        for v_col in rate_cols:
-            val = final_report.at[idx, v_col]
-            v_name = v_col.replace("Rate_", "")
+        if is_item:
+            # IT IS AN ITEM (Analyze Rates)
+            row_rates = []
+            rate_map = []
             
-            # Check if it's a valid number
-            try:
-                f_val = float(val)
-                if pd.notna(f_val):
-                     row_rates.append(f_val)
-                     rate_map.append((f_val, v_name))
-            except:
-                pass
-        
-        if row_rates:
-            min_val = min(row_rates)
-            max_val = max(row_rates)
+            for v_col in rate_cols:
+                val = final_report.at[idx, v_col]
+                v_name = v_col.replace("Rate_", "")
+                try:
+                    f_val = float(val)
+                    if pd.notna(f_val):
+                         row_rates.append(f_val)
+                         rate_map.append((f_val, v_name))
+                except:
+                    pass
             
-            metadata['min_max'][idx] = {
-                'min': min_val,
-                'max': max_val
-            }
+            if row_rates:
+                min_val = min(row_rates)
+                max_val = max(row_rates)
+                
+                metadata['min_max'][idx] = {'min': min_val, 'max': max_val}
+                
+                min_vendors = [v for r, v in rate_map if r == min_val]
+                max_vendors = [v for r, v in rate_map if r == max_val]
+                
+                final_report.at[idx, 'Lowest_Vendor'] = ", ".join(min_vendors)
+                final_report.at[idx, 'Highest_Vendor'] = ", ".join(max_vendors)
             
-            # Identify which vendors have these values (Handle ties)
-            min_vendors = [v for r, v in rate_map if r == min_val]
-            max_vendors = [v for r, v in rate_map if r == max_val]
+            # --- Estimate Comparison Logic ---
+            if estimated_file and 'Estimated_Rate' in final_report.columns:
+                est_val_raw = final_report.at[idx, 'Estimated_Rate']
+                try:
+                    est_val = float(est_val_raw)
+                    if pd.notna(est_val) and row_rates:
+                        # Find closest rate
+                        closest_diff = float('inf')
+                        closest_vs = []
+                        for r, v in rate_map:
+                            diff = abs(r - est_val)
+                            # Floating point comparison safety margin
+                            if abs(diff - closest_diff) < 1e-9:
+                                closest_vs.append(v)
+                            elif diff < closest_diff:
+                                closest_diff = diff
+                                closest_vs = [v]
+                        
+                        metadata['closest_vendors'][idx] = closest_vs
+                        final_report.at[idx, 'Closest_to_Estimate'] = ", ".join(closest_vs)
+                except Exception:
+                    pass  # Missing or invalid estimated rate for this item
+
+        else:
+            # NOT AN ITEM: Possibly a Subtotal or Total (Analyze Amounts)
+            row_amounts = []
+            amt_map = []
             
-            final_report.at[idx, 'Lowest_Vendor'] = ", ".join(min_vendors)
-            final_report.at[idx, 'Highest_Vendor'] = ", ".join(max_vendors)
+            for a_col in amount_cols:
+                val = final_report.at[idx, a_col]
+                v_name = a_col.replace("Amount_", "")
+                try:
+                    f_val = float(val)
+                    if pd.notna(f_val):
+                         row_amounts.append(f_val)
+                         amt_map.append((f_val, v_name))
+                except:
+                    pass
             
+            # If the row has valid amounts, track min/max for amounts instead of rates
+            if row_amounts:
+                min_amt = min(row_amounts)
+                max_amt = max(row_amounts)
+                
+                # Check for completely blank rows where sum is 0
+                if max_amt > 0 or min_amt < 0:
+                    metadata['min_max_amounts'][idx] = {'min': min_amt, 'max': max_amt}
+                    
+                    min_vendors = [v for a, v in amt_map if a == min_amt]
+                    max_vendors = [v for a, v in amt_map if a == max_amt]
+                    
+                    final_report.at[idx, 'Lowest_Vendor'] = ", ".join(min_vendors)
+                    final_report.at[idx, 'Highest_Vendor'] = ", ".join(max_vendors)
+
     # 3. Identify Incomplete Vendors
-    # A vendor is incomplete if they have ANY missing/zero rate for a VALID item.
-    # (Assuming Quote means Rate > 0)
-    
     for v_col in rate_cols:
         v_name = v_col.replace("Rate_", "")
-        
-        # Check rates for all valid rows
-        # We extract the subset of this column for valid rows
-        # Ensure we treat empty strings or weird chars as NaN
         subset = pd.to_numeric(final_report.loc[valid_mask, v_col], errors='coerce')
-        
-        # If any is NaN (missing) OR Zero (if we assume Rate must be > 0), tag as incomplete
-        # User requested "not null quantity" must have items.
-        # We'll treat 0.0 as incomplete too, as free items are rare in this context or usually explicit.
         if subset.isna().any() or (subset <= 0).any():
             metadata['incomplete_vendors'].append(v_name)
 
@@ -266,5 +314,10 @@ def process_quotations(ref_file, vendor_files, sheet_config=None) -> tuple[pd.Da
     qty_col = next((c for c in final_report.columns if 'qty' in str(c).lower()), None)
     if qty_col:
         final_report[qty_col] = final_report[qty_col].astype(str)
+        
+    # Ensure Rate and Amount columns are purely numeric to prevent PyArrow mixed-type crashes (e.g. from '-')
+    for col in final_report.columns:
+        if str(col).startswith('Rate_') or str(col).startswith('Amount_') or col == 'Estimated_Rate':
+            final_report[col] = pd.to_numeric(final_report[col], errors='coerce')
 
     return final_report, metadata
